@@ -67,9 +67,8 @@ if __name__ == '__main__':
     response = requests.get(stream_url, headers=api_headers)
     assert_response(response)
 
-    response = requests.head(response.content, headers=api_headers,
-                             allow_redirects=True)
-    assert_response(response)
+    response = requests.head(response.content, headers=api_headers)
+    assert_response(response, status_code=requests.codes.found)
 
     player = args['--player']
     if player:
