@@ -29,7 +29,7 @@ api_headers = {
         'AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7'),
 }
 
-video_id_re = re.compile(',([0-9]+)\.html$')
+video_id_re = re.compile(',([0-9]+)(?:,ogladaj)?\.html$')
 
 
 def assert_response(response, status_code=requests.codes.ok):
