@@ -1,0 +1,78 @@
+#!/usr/bin/env python
+
+"""Usage: tvnplayer [-p COMMAND] [--hd] [URL]
+
+  -h --help            Show this help
+  -p --player COMMAND  Pass stream URL to player
+  --hd                 Request a high definition stream (if available)
+"""
+
+import re
+import subprocess
+import sys
+from urlparse import urlsplit
+
+from docopt import docopt
+import requests
+
+api_url = 'http://tvnplayer.pl/api/'
+api_params = {
+    'authKey': 'ba786b315508f0920eca1c34d65534cd',
+    'format': 'json',
+    'platform': 'ConnectedTV',
+    'terminal': 'Samsung',
+    'v': '2.0',
+}
+api_headers = {
+    'user-agent': (
+        'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) ',
+        'AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7'),
+}
+
+video_id_re = re.compile(',([0-9]+)\.html$')
+
+
+def assert_response(response, status_code=requests.codes.ok):
+    if response.status_code != status_code:
+        sys.exit('{} returned {}'.format(response.url, response.status_code))
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__)
+
+    url = args['URL'] or raw_input('Video details URL: ')
+
+    match = video_id_re.search(urlsplit(url).path)
+    if not match:
+        sys.exit('This URL seems to be invalid...')
+
+    params = {'m': 'getItem', 'id': int(match.group(1))}
+    params.update(api_params)
+
+    response = requests.get(api_url, params=params, headers=api_headers)
+    assert_response(response)
+
+    streams = response.json()['item']['videos']['main']['video_content']
+    if not streams:
+        sys.exit('No video streams available')
+
+    streams = dict([(stream['profile_name'].lower(), stream['url']) for
+                    stream in streams])
+
+    if args['--hd'] and 'hd' in streams:
+        stream_url = streams['hd']
+    else:
+        stream_url = streams['standard']
+
+    response = requests.get(stream_url, headers=api_headers)
+    assert_response(response)
+
+    response = requests.head(response.content, headers=api_headers,
+                             allow_redirects=True)
+    assert_response(response)
+
+    player = args['--player']
+    if player:
+        subprocess.call([player, response.url])
+    else:
+        print response.url
