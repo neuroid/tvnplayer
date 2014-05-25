@@ -1,21 +1,36 @@
 #!/usr/bin/env python
-
-"""Usage: tvnplayer [-p COMMAND] [--hd] [URL]
+"""Usage: tvnplayer [-o FILE | -p COMMAND] [--hd] [URL]
 
   -h --help            Show this help
+  -o --output FILE     Write stream to FILE; if - is used as FILE,
+                       stream will be written to standard output
   -p --player COMMAND  Pass stream URL to player
   --hd                 Request a high definition stream (if available)
-"""
 
+The default action is to print the stream URL to standard output.
+"""
+from __future__ import print_function
+import contextlib
+import os
 import re
 import subprocess
 import sys
-from urlparse import urlsplit
+
+try:
+    from urlparse import urlsplit
+except ImportError:
+    from urllib.parse import urlsplit
 
 from docopt import docopt
 import requests
 
+try:
+    input = raw_input
+except NameError:
+    pass
+
 api_url = 'http://tvnplayer.pl/api/'
+
 api_params = {
     'authKey': 'ba786b315508f0920eca1c34d65534cd',
     'format': 'json',
@@ -23,55 +38,129 @@ api_params = {
     'terminal': 'Samsung',
     'v': '2.0',
 }
+
 api_headers = {
-    'user-agent': (
-        'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) ',
-        'AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7'),
+    'User-Agent':
+        'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) ' +
+        'AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7',
 }
+
+http_max_retries = 3
+http_content_chunk_size = 4096
 
 video_id_re = re.compile(',([0-9]+)(?:,ogladaj)?\.html$')
 
 
+def print_status(message):
+    print('[tvnplayer] {}'.format(message), file=sys.stderr)
+
+
+def response_callback(response, *args, **kwargs):
+    print_status('{}'.format(response.url))
+
+
 def assert_response(response, status_code=requests.codes.ok):
     if response.status_code != status_code:
-        sys.exit('{} returned {}'.format(response.url, response.status_code))
+        print_status('Request returned {} (expected {})'.format(
+                     response.status_code, status_code))
+        sys.exit(1)
 
 
-if __name__ == '__main__':
+@contextlib.contextmanager
+def open_output(name):
+    if name == '-':
+        output_file = os.fdopen(sys.stdout.fileno(), 'wb', 0)
+    else:
+        output_file = open(name, 'wb')
+    try:
+        yield output_file
+    finally:
+        if name != '-':
+            output_file.close()
+
+
+def readable_size(bytes):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024.0:
+            return '{:.1f} {}'.format(bytes, unit)
+        bytes /= 1024.0
+    return '{:.1f} TB'.format(bytes)
+
+
+def main():
     args = docopt(__doc__)
 
-    url = args['URL'] or raw_input('Video details URL: ')
+    url = args['URL'] or input('Video details URL: ')
 
     match = video_id_re.search(urlsplit(url).path)
     if not match:
-        sys.exit('This URL seems to be invalid...')
+        print_status('This URL seems to be invalid...')
+        sys.exit(1)
+
+    session = requests.Session()
+    session.headers.update(api_headers)
+    session.hooks.update({'response': response_callback})
+    session.mount('http://',
+                  requests.adapters.HTTPAdapter(max_retries=http_max_retries))
 
     params = {'m': 'getItem', 'id': int(match.group(1))}
     params.update(api_params)
 
-    response = requests.get(api_url, params=params, headers=api_headers)
+    response = session.get(api_url, params=params)
     assert_response(response)
 
-    streams = response.json()['item']['videos']['main']['video_content']
+    video = response.json()['item']
+    if not video:
+        print_status('Video not available')
+        sys.exit(1)
+
+    streams = video['videos']['main']['video_content']
     if not streams:
-        sys.exit('No video streams available')
+        print_status('No video streams available')
+        sys.exit(1)
 
     streams = dict([(stream['profile_name'].lower(), stream['url']) for
                     stream in streams])
+
+    print_status('Found {} video stream(s)'.format(len(streams)))
 
     if args['--hd'] and 'hd' in streams:
         stream_url = streams['hd']
     else:
         stream_url = streams['standard']
 
-    response = requests.get(stream_url, headers=api_headers)
+    response = session.get(stream_url)
     assert_response(response)
 
-    response = requests.head(response.content, headers=api_headers)
-    assert_response(response, status_code=requests.codes.found)
-
+    output = args['--output']
     player = args['--player']
-    if player:
-        subprocess.call([player, response.url])
+
+    if output:
+        response = session.get(response.text, stream=True)
+        assert_response(response)
+
+        with open_output(output) as output_file:
+            bytes = int(response.headers['content-length'])
+            print_status("Downloading {} to '{}'".format(readable_size(bytes),
+                                                         output))
+
+            for chunk in response.iter_content(http_content_chunk_size):
+                if not chunk:
+                    break
+                output_file.write(chunk)
     else:
-        print response.url
+        response = session.head(response.text)
+        assert_response(response, status_code=requests.codes.found)
+
+        if player:
+            print_status("Launching '{}'".format(player))
+            subprocess.call([player, response.url])
+        else:
+            print(response.url)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
