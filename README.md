@@ -1,7 +1,7 @@
 tvnplayer
 =========
 
-Tiny helper for playing http://tvnplayer.pl/ content in Linux.
+Tiny helper for playing https://player.pl/ content on Linux.
 
 
 Usage
