@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-"""Usage: tvnplayer [-o FILE | -p COMMAND] [--hd] [URL]
+"""Usage: tvnplayer [-o FILE | -p COMMAND] [--debug] [URL]
 
   -h --help            Show this help
   -o --output FILE     Write stream to FILE; if - is used as FILE,
                        stream will be written to standard output
   -p --player COMMAND  Pass stream URL to player
-  --hd                 Request a high definition stream (if available)
+  --debug              Show HTTP responses
 
 The default action is to print the stream URL to standard output.
 """
 from __future__ import print_function
+from collections import OrderedDict
 import contextlib
+import json
 import os
 import re
 import subprocess
@@ -29,26 +31,27 @@ try:
 except NameError:
     pass
 
-api_url = 'http://tvnplayer.pl/api/'
+api_url = 'http://api.tvnplayer.pl/api/'
 
 api_params = {
-    'authKey': 'ba786b315508f0920eca1c34d65534cd',
+    'authKey': '453198a80ccc99e8485794789292f061',
     'format': 'json',
     'platform': 'ConnectedTV',
-    'terminal': 'Samsung',
-    'v': '2.0',
+    'terminal': 'Samsung2',
+    'v': '3.6',
 }
 
 api_headers = {
     'User-Agent':
-        'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) ' +
+        'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) '
         'AppleWebKit/534.7 (KHTML, like Gecko) SmartTV Safari/534.7',
 }
 
 http_max_retries = 3
 http_content_chunk_size = 4096
 
-video_id_re = re.compile(',([0-9]+)(?:,ogladaj)?\.html$')
+profiles = ('hd', 'bardzo wysoka', 'wysoka', 'sd', 'standard')
+video_id_re = re.compile(r',([0-9]+)$')
 
 
 def print_status(message):
@@ -56,10 +59,20 @@ def print_status(message):
 
 
 def response_callback(response, *args, **kwargs):
-    print_status('{}'.format(response.url))
+    print_status('[{}|{}] {}'.format(response.request.method.lower(),
+                                     response.status_code, response.url))
 
 
-def assert_response(response, status_code=requests.codes.ok):
+def assert_response(response, status_code=requests.codes.ok, debug=False):
+    if debug:
+        headers = json.dumps(dict(response.headers), sort_keys=True, indent=2)
+        print_status('[headers]\n' + headers)
+        try:
+            body = json.dumps(response.json(), sort_keys=True, indent=2)
+        except ValueError:
+            body = response.text
+        print_status('[body]\n' + body)
+
     if response.status_code != status_code:
         print_status('Request returned {} (expected {})'.format(
                      response.status_code, status_code))
@@ -90,7 +103,8 @@ def readable_size(bytes):
 def main():
     args = docopt(__doc__)
 
-    url = args['URL'] or input('Video details URL: ')
+    url = args['URL'] or input('Video URL: ')
+    debug = args['--debug']
 
     match = video_id_re.search(urlsplit(url).path)
     if not match:
@@ -107,9 +121,9 @@ def main():
     params.update(api_params)
 
     response = session.get(api_url, params=params)
-    assert_response(response)
+    assert_response(response, debug=debug)
 
-    video = response.json()['item']
+    video = response.json().get('item')
     if not video:
         print_status('Video not available')
         sys.exit(1)
@@ -119,29 +133,37 @@ def main():
         print_status('No video streams available')
         sys.exit(1)
 
-    streams = dict([(stream['profile_name'].lower(), stream['url']) for
-                    stream in streams])
+    streams = OrderedDict([(stream['profile_name'].lower(),
+                            stream.get('url') or stream['src'])
+                           for stream in streams])
 
     print_status('Found {} video stream(s)'.format(len(streams)))
 
-    if args['--hd'] and 'hd' in streams:
-        stream_url = streams['hd']
+    for profile in profiles:
+        try:
+            stream_url = streams[profile]
+        except KeyError:
+            pass
+        else:
+            break
     else:
-        stream_url = streams['standard']
+        stream_url = streams.values()[0]
 
-    response = session.get(stream_url)
-    assert_response(response)
+    if stream_url.startswith('http://tvnplayer.pl'):
+        response = session.get(stream_url)
+        assert_response(response, debug=debug)
+        stream_url = response.text
 
     output = args['--output']
     player = args['--player']
 
     if output:
-        response = session.get(response.text, stream=True)
+        response = session.get(stream_url, stream=True)
         assert_response(response)
 
         with open_output(output) as output_file:
-            bytes = int(response.headers['content-length'])
-            print_status("Downloading {} to '{}'".format(readable_size(bytes),
+            size = int(response.headers['content-length'])
+            print_status("Downloading {} to '{}'".format(readable_size(size),
                                                          output))
 
             for chunk in response.iter_content(http_content_chunk_size):
@@ -149,8 +171,8 @@ def main():
                     break
                 output_file.write(chunk)
     else:
-        response = session.head(response.text)
-        assert_response(response, status_code=requests.codes.found)
+        response = session.head(stream_url, allow_redirects=True)
+        assert_response(response, debug=debug)
 
         if player:
             print_status("Launching '{}'".format(player))
